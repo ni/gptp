@@ -151,8 +151,6 @@ int main(int argc, char **argv)
 	bool automotiveProfile = false;
 	bool pps = false;
 	uint8_t priority1 = 248;
-	bool override_portstate = false;
-	PortState port_state = PTP_SLAVE;
 	char *restoredata = NULL;
 	char *restoredataptr = NULL;
 	off_t restoredatalength = 0;
