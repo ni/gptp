@@ -170,7 +170,6 @@ PTPMessageCommon *buildPTPMessage
 		GPTP_LOG_EXCEPTION("*** Received message with unsupported transportSpecific type=%d", transportSpecific);
 		goto abort;
 	}
- 
 	switch (messageType) {
 	case SYNC_MESSAGE:
 
@@ -875,7 +874,12 @@ void PTPMessageAnnounce::processMessage( CommonPort *port )
 	// Add message to the list
 	port->setQualifiedAnnounce( this );
 
-	port->getClock()->addEventTimerLocked(port, STATE_CHANGE_EVENT, 16000000);
+	// When externalPortConfiguration is disabled, the BMCA is used
+	if (!port->externalPortConfigurationEnabled()) {
+		port->getClock()->addEventTimerLocked(port, STATE_CHANGE_EVENT, 16000000);
+	} else {
+		port->processAnnounceExt();
+	}
  bail:
 	port->getClock()->addEventTimerLocked
 		(port, ANNOUNCE_RECEIPT_TIMEOUT_EXPIRES,
@@ -1152,7 +1156,8 @@ void PTPMessageFollowUp::processMessage
 		( port, scalar_offset, sync_arrival, local_clock_adjustment,
 		  local_system_offset, system_time, local_system_freq_offset,
 		  port->getSyncCount(), port->getPdelayCount(),
-		  port->getPortState(), port->getAsCapable( ));
+		  port->getPortState(), port->getAsCapable(),
+           		  port->getLinkDelay() );
 
 		port->syncDone();
 		// Restart the SYNC_RECEIPT timer
@@ -1422,8 +1427,8 @@ void PTPMessagePathDelayResp::processMessage( CommonPort *port )
 
 	port->incCounter_ieee8021AsPortStatRxPdelayResponse();
 
-	if (eport->tryPDelayRxLock() != true) {
-		GPTP_LOG_ERROR("Failed to get PDelay RX Lock");
+	if (port->getLastPDelayLock() != true) {
+		GPTP_LOG_ERROR("Failed to get last PDelay lock while processing a PDelayResp");
 		return;
 	}
 
@@ -1480,7 +1485,7 @@ bypass_verify_duplicate:
 		delete old_pdelay_resp;
 	}
 
-	eport->putPDelayRxLock();
+	port->putLastPDelayLock();
 	_gc = false;
 
 	return;
@@ -1599,29 +1604,36 @@ void PTPMessagePathDelayRespFollowUp::processMessage
 
 	port->incCounter_ieee8021AsPortStatRxPdelayResponseFollowUp();
 
-	if (eport->tryPDelayRxLock() != true)
+	if (port->getLastPDelayLock() != true) {
+		GPTP_LOG_ERROR("Failed to get last PDelay lock while processing a PDelay Follow Up");
 		return;
+	}
 
 	req = eport->getLastPDelayReq();
 	resp = eport->getLastPDelayResp();
 
 	if (req == NULL) {
-		/* Shouldn't happen */
-		GPTP_LOG_ERROR
+		// When an invalid PDelayRespFollowup is recieved, this function deletes
+		// the last_pdelay_req and _resp pointers. So this condition can be hit
+		// when another PDelayRespFollowup is received before a new PDelayReq has
+		// been sent out.
+		GPTP_LOG_DEBUG
 		    (">>> Received PDelay followup but no REQUEST exists");
 		goto abort;
 	}
 
 	if (resp == NULL) {
-		/* Probably shouldn't happen either */
-		GPTP_LOG_ERROR
+		// When an invalid PDelayRespFollowup is recieved, this function deletes
+		// the last_pdelay_req and _resp pointers. So this condition can be hit
+		// when another PDelayRespFollowup is received before a new PDelayResp.
+		GPTP_LOG_DEBUG
 		    (">>> Received PDelay followup but no RESPONSE exists");
 
 		goto abort;
 	}
 
 	if( req->getSequenceId() != sequenceId ) {
-		GPTP_LOG_ERROR
+		GPTP_LOG_DEBUG
 			( "Received PDelay FUP has different seqID than the "
 			  "PDelay request (%d/%d)",
 			  sequenceId, req->getSequenceId() );
@@ -1652,10 +1664,10 @@ void PTPMessagePathDelayRespFollowUp::processMessage
 		* IEEE 802.1AS, Figure 11-8, subclause 11.2.15.3
 		*/
 		if (resp->getSequenceId() != sequenceId) {
-			GPTP_LOG_ERROR
+			GPTP_LOG_DEBUG
 			("Received PDelay Response Follow Up but cannot find "
 				"corresponding response");
-			GPTP_LOG_ERROR( "%hu, %hu, %hu, %hu",
+			GPTP_LOG_DEBUG( "%hu, %hu, %hu, %hu",
 					resp->getSequenceId(), sequenceId,
 					resp_port_number, req_port_number );
 
@@ -1666,7 +1678,7 @@ void PTPMessagePathDelayRespFollowUp::processMessage
 		* IEEE 802.1AS, Figure 11-8, subclause 11.2.15.3
 		*/
 		if (req_clkId != resp_clkId) {
-			GPTP_LOG_ERROR
+			GPTP_LOG_DEBUG
 			( "ClockID Resp/Req differs. PDelay Response ClockID: "
 			  "%s PDelay Request ClockID: %s",
 			  req_clkId.getIdentityString().c_str(),
@@ -1678,7 +1690,7 @@ void PTPMessagePathDelayRespFollowUp::processMessage
 		* IEEE 802.1AS, Figure 11-8, subclause 11.2.15.3
 		*/
 		if (resp_port_number != req_port_number) {
-			GPTP_LOG_ERROR
+			GPTP_LOG_DEBUG
 			( "Request port number (%hu) is different from "
 			  "Response port number (%hu)",
 			  req_port_number, resp_port_number );
@@ -1690,7 +1702,7 @@ void PTPMessagePathDelayRespFollowUp::processMessage
 		* IEEE 802.1AS, Figure 11-8, subclause 11.2.15.3
 		*/
 		if (fup_sourcePortIdentity != resp_sourcePortIdentity) {
-			GPTP_LOG_ERROR( "Source port identity from "
+			GPTP_LOG_DEBUG( "Source port identity from "
 					"PDelay Response/FUP differ" );
 
 			goto abort;
@@ -1817,16 +1829,18 @@ void PTPMessagePathDelayRespFollowUp::processMessage
 	}
 	if( !port->setLinkDelay( link_delay ))
 	{
-		if( !eport->getAutomotiveProfile( ))
+		if( !port->forceAsCapableEnabled() &&
+			 (port->getAsCapable() || !port->getAsCapableEvaluated()) ) {
 		{
-			GPTP_LOG_ERROR( "Link delay %ld beyond "
+			GPTP_LOG_STATUS( "Link delay %ld beyond "
 					"neighborPropDelayThresh; "
 					"not AsCapable", link_delay );
 			port->setAsCapable( false );
 		}
 	} else
 	{
-		if( !eport->getAutomotiveProfile( ))
+		if( !port->forceAsCapableEnabled() && !port->getAsCapable() ) {
+			GPTP_LOG_STATUS("Link delay %ld within neighborPropDelayThresh; setting AsCapable", link_delay);
 			port->setAsCapable( true );
 	}
 	port->setPeerOffset( request_tx_timestamp, remote_req_rx_timestamp );
@@ -1838,7 +1852,7 @@ void PTPMessagePathDelayRespFollowUp::processMessage
 	_gc = true;
 
  defer:
-	eport->putPDelayRxLock();
+	port->putLastPDelayLock();
 
 	return;
 }
@@ -2009,7 +2023,7 @@ void PTPMessageSignalling::processMessage( CommonPort *port )
 		port->startSyncIntervalTimer(waitTime);
 	}
 
-	if (!port->getAutomotiveProfile()) {
+	if (port->transmitAnnounceEnabled()) {
 		if (announceInterval == PTPMessageSignalling::sigMsgInterval_Initial) {
 			// TODO: Needs implementation
 			GPTP_LOG_WARNING("Signal received to set Announce message to initial interval: Not implemented");

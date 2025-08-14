@@ -443,46 +443,66 @@ void *LinuxTimerQueueHandler( void *arg ) {
 	timeout.tv_sec = 0; timeout.tv_nsec = 100000000; /* 100 ms */
 
 	sigemptyset( &waitfor );
+
 	GPTP_LOG_DEBUG("Signal thread started");
 	while( !timerq->stop ) {
-		siginfo_t info;
+		siginfo_t info = { 0 };
 		LinuxTimerQueueMap_t::iterator iter;
+		struct LinuxTimerQueueActionArg *actionArgPtr = NULL;
 		sigaddset( &waitfor, SIGUSR1 );
-		if( sigtimedwait( &waitfor, &info, &timeout ) == -1 ) {
-			if( errno == EAGAIN ) {
-				continue;
-			}
-			else {
-				GPTP_LOG_ERROR("Signal thread sigtimedwait error: %d", errno);
-				break;
-			}
+		int result = 0;
+		do {
+			result = sigtimedwait( &waitfor, &info, &timeout );
+		} while( result == -1 && ( errno == EAGAIN || errno == EINTR ) );
+
+		if( result == -1 ) {
+			GPTP_LOG_ERROR( "LinuxTimerQueueHandler: sigtimedwait() errno: %s(%d).",
+				strerror( errno ), errno );
+			_exit(EXIT_FAILURE);
 		}
-		if( timerq->lock->lock() != oslock_ok ) {
-			break;
+
+		int lockStatus = 0;
+		if( (lockStatus = timerq->lock->lock()) != oslock_ok ) {
+			GPTP_LOG_ERROR( "LinuxTimerQueueHandler: timerq->lock->lock(): error %d",
+				 lockStatus );
+			// Ensure the daemon exits on fatal error
+			_exit(EXIT_FAILURE);
 		}
 
 		iter = timerq->timerQueueMap.find(info.si_value.sival_int);
 		if( iter != timerq->timerQueueMap.end() ) {
-		    struct LinuxTimerQueueActionArg *arg = iter->second;
+			// The timer queue lock should only be held to protect operations on
+			// the queue. Remove the timer action from the queue and release the
+			// lock before processing the action.
+			actionArgPtr = iter->second;
 			timerq->timerQueueMap.erase(iter);
-			timerq->LinuxTimerQueueAction( arg );
-			if( arg->rm ) {
-				delete arg->inner_arg;
-			}
-			timer_delete(arg->timer_handle);
-			delete arg;
 		}
-		if( timerq->lock->unlock() != oslock_ok ) {
-			break;
+
+		lockStatus = 0;
+		if( (lockStatus = timerq->lock->unlock()) != oslock_ok ) {
+			GPTP_LOG_ERROR( "LinuxTimerQueueHandler: timerq->lock->unlock(): error %d",
+				 lockStatus );
+			// Ensure the daemon exits on fatal error
+			_exit(EXIT_FAILURE);
+		}
+
+		if( actionArgPtr != NULL ) {
+			timerq->LinuxTimerQueueAction( actionArgPtr );
+			if( actionArgPtr->rm ) {
+				delete actionArgPtr->inner_arg;
+			}
+			timer_delete(actionArgPtr->timer_handle);
+			delete actionArgPtr;
+			actionArgPtr = NULL;
 		}
 	}
 	GPTP_LOG_DEBUG("Signal thread exit");
+
 	return NULL;
 }
 
 void LinuxTimerQueue::LinuxTimerQueueAction( LinuxTimerQueueActionArg *arg ) {
 	arg->func( arg->inner_arg );
-
 	return;
 }
 
@@ -943,7 +963,8 @@ bool LinuxSharedMemoryIPC::update(
 	uint32_t sync_count,
 	uint32_t pdelay_count,
 	PortState port_state,
-	bool asCapable )
+	bool asCapable,
+	uint64_t mean_path_delay )
 {
 	int buf_offset = 0;
 	pid_t process_id = getpid();

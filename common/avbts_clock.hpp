@@ -141,7 +141,6 @@ private:
 
 	OSTimerQueue *timerq;
 
-	bool forceOrdinarySlave;
 	FrequencyRatio _master_local_freq_offset;
 	FrequencyRatio _local_system_freq_offset;
 
@@ -161,10 +160,9 @@ private:
     FollowUpTLV *fup_status;
 
     OSLock *timerq_lock;
+    OSLock *ipc_lock;
 
-public:
-	
-    /**
+	/**
 	 * @brief  Add a new event to the timer queue
 	 * @param  target EtherPort target
 	 * @param  e Event to be added
@@ -181,10 +179,9 @@ public:
 	 * @return void
 	 */
 	void deleteEventTimer( CommonPort *target, Event e );
-
+public:
   /**
    * @brief Instantiates a IEEE 1588 Clock
-   * @param forceOrdinarySlave Forces it to be an ordinary slave
    * @param syntonize if TRUE, clock will syntonize to the master clock
    * @param priority1 It is used in the execution of BCMA. See IEEE 802.1AS-2011 Clause 10.3
    * @param timerq_factory [in] Provides a factory object for creating timer queues (managing events)
@@ -192,7 +189,7 @@ public:
    * @param lock_factory [in] Provides a factory object for creating locking a locking mechanism
    */
   IEEE1588Clock
-	  (bool forceOrdinarySlave, bool syntonize, uint8_t priority1,
+	  (bool syntonize, uint8_t priority1,
 	   OSTimerQueueFactory * timerq_factory, OS_IPC * ipc,
 	   OSLockFactory *lock_factory );
 
@@ -328,6 +325,14 @@ public:
   }
 
   /**
+   * @brief Sets the IEEE 1588 Clock quality
+   * @return void
+  */
+  void setClockQuality( ClockQuality new_clock_quality ) {
+	clock_quality = new_clock_quality;
+  }
+
+  /**
    * @brief  Gets grandmaster priority1 attribute (IEEE 802.1AS-2011 Clause 10.5.3.2.2)
    * @return Grandmaster priority1
    */
@@ -399,6 +404,15 @@ public:
    */
   unsigned char getPriority2(void) {
 	  return priority2;
+  }
+
+  /**
+   * @brief  Sets IEEE1588Clock priority2 attribute (IEEE 802.1AS clause 8.6.2.5)
+   * @return void
+   */
+  void setPriority2( unsigned char newPriority2 ) {
+      /*TODO: add range check */
+      priority2 = newPriority2;
   }
 
   /**
@@ -633,7 +647,6 @@ public:
 	  return true;
   }
 
-
   /**
    * @brief  Declares a friend instance of tick_handler method
    * @param  sig Signal
@@ -664,6 +677,15 @@ public:
   OSLock *timerQLock() {
 	  return timerq_lock;
   }
+
+  bool getIpcLock() {
+     return ipc_lock->lock() == oslock_ok ? true : false;
+  }
+
+  bool putIpcLock() {
+     return ipc_lock->unlock() == oslock_ok ? true : false;
+  }
+
 };
 
 void tick_handler(int sig);

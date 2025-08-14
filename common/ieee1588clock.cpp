@@ -78,7 +78,7 @@ void ClockIdentity::set(LinkLayerAddress * addr)
 }
 
 IEEE1588Clock::IEEE1588Clock
-( bool forceOrdinarySlave, bool syntonize, uint8_t priority1,
+( bool syntonize, uint8_t priority1,
   OSTimerQueueFactory *timerq_factory, OS_IPC *ipc,
   OSLockFactory *lock_factory )
 {
@@ -86,8 +86,6 @@ IEEE1588Clock::IEEE1588Clock
 	priority2 = 248;
 
 	number_ports = 0;
-
-	this->forceOrdinarySlave = forceOrdinarySlave;
 
     /*TODO: Make the values below configurable*/
 	clock_quality.clockAccuracy = 0x22;
@@ -112,6 +110,7 @@ IEEE1588Clock::IEEE1588Clock
  	memset( &LastEBestIdentity, 0xFF, sizeof( LastEBestIdentity ));
 
 	timerq_lock = lock_factory->createLock( oslock_recursive );
+	ipc_lock = lock_factory->createLock( oslock_recursive );
 
 	// This should be done LAST!! to pass fully initialized clock object
 	timerq = timerq_factory->createOSTimerQueue( this );
@@ -352,17 +351,19 @@ void IEEE1588Clock::setMasterOffset
   Timestamp local_time, FrequencyRatio master_local_freq_offset,
   int64_t local_system_offset, Timestamp system_time,
   FrequencyRatio local_system_freq_offset, unsigned sync_count,
-  unsigned pdelay_count, PortState port_state, bool asCapable )
+  unsigned pdelay_count, PortState port_state, bool asCapable,
+  uint64_t mean_path_delay )
 {
 	_master_local_freq_offset = master_local_freq_offset;
 	_local_system_freq_offset = local_system_freq_offset;
 
-	if (port->getTestMode()) {
-		GPTP_LOG_STATUS("Clock offset:%lld   Clock rate ratio:%Lf   Sync Count:%u   PDelay Count:%u", 
-						master_local_offset, master_local_freq_offset, sync_count, pdelay_count);
+	if (port->testModeEnabled()) {
+		GPTP_LOG_STATUS("Clock offset:%lld   Clock rate ratio:%Lf   Sync Count:%u   PDelay Count:%u",
+		                 master_local_offset, master_local_freq_offset, sync_count, pdelay_count);
 	}
 
-	if( ipc != NULL ) {
+	if( ipc != NULL && getIpcLock() ) {
+
 		uint8_t grandmaster_id[PTP_CLOCK_IDENTITY_LENGTH];
 		uint8_t clock_id[PTP_CLOCK_IDENTITY_LENGTH];
 		PortIdentity port_identity;
@@ -376,20 +377,22 @@ void IEEE1588Clock::setMasterOffset
 		ipc->update(
 			master_local_offset, local_system_offset, master_local_freq_offset,
 			local_system_freq_offset, TIMESTAMP_TO_NS(local_time),
-			sync_count, pdelay_count, port_state, asCapable);
+			sync_count, pdelay_count, port_state, asCapable, mean_path_delay);
 
 		ipc->update_grandmaster(
 			grandmaster_id, domain_number);
 
 		ipc->update_network_interface(
 			clock_id, priority1,
-			clock_quality.cq_class,	clock_quality.offsetScaledLogVariance,
+			clock_quality.cq_class, clock_quality.offsetScaledLogVariance,
 			clock_quality.clockAccuracy,
 			priority2, domain_number,
 			port->getSyncInterval(),
 			port->getAnnounceInterval(),
-			0, // TODO:  Was port->getPDelayInterval() before refactoring.  What do we do now?
+			0, // TODO: Was port->getPDelayInterval() before refactoring. What do we do now?
 			port_number);
+
+		putIpcLock();
 	}
 
 	if( master_local_offset == 0 && master_local_freq_offset == 1.0 ) {
@@ -403,7 +406,7 @@ void IEEE1588Clock::setMasterOffset
 			/* Make sure that there are no transmit operations
 			   in progress */
 			getTxLockAll();
-			if (port->getTestMode()) {
+			if (port->testModeEnabled()) {
 				GPTP_LOG_STATUS("Adjust clock phase offset:%lld", -master_local_offset);
 			}
 			port->adjustClockPhase( -master_local_offset );
@@ -428,7 +431,7 @@ void IEEE1588Clock::setMasterOffset
 
 		if( _ppm < LOWER_FREQ_LIMIT ) _ppm = LOWER_FREQ_LIMIT;
 		if( _ppm > UPPER_FREQ_LIMIT ) _ppm = UPPER_FREQ_LIMIT;
-		if ( port->getTestMode() ) {
+		if ( port->testModeEnabled() ) {
 			GPTP_LOG_STATUS("Adjust clock rate ppm:%f", _ppm);
 		}
 		if( !port->adjustClockRate( _ppm ) ) {

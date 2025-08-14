@@ -56,6 +56,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <string.h>
+#include <net/if.h>
+#include <sys/ioctl.h>
 
 #ifdef SYSTEMD_WATCHDOG
 #include <watchdog.hpp>
@@ -73,7 +75,10 @@ void print_usage( char *arg0 ) {
 			"%s <network interface> [-S] [-P] [-M <filename>] "
 			"[-G <group>] [-R <priority 1>] "
 			"[-D <gb_tx_delay,gb_rx_delay,mb_tx_delay,mb_rx_delay>] "
-			"[-T] [-L] [-E] [-GM] [-N] [-INITSYNC <value>] [-OPERSYNC <value>] "
+			"[-V] [-EPC <gm/slave/off>] "
+			"[-TA <true/false>] [-FAC <true/false>] [-SRN <true/false>] "
+			"[-SS <true/false>] [-TM <true/false>] "
+			"[-INITSYNC <value>] [-OPERSYNC <value>] "
 			"[-INITPDELAY <value>] [-OPERPDELAY <value>] "
 			"[-F <path to gptp_cfg.ini file>] "
 			"\n",
@@ -86,12 +91,13 @@ void print_usage( char *arg0 ) {
 		  "\t-G <group> group id for shared memory\n"
 		  "\t-R <priority 1> priority 1 value\n"
 		  "\t-D Phy Delay <gb_tx_delay,gb_rx_delay,mb_tx_delay,mb_rx_delay>\n"
-		  "\t-T force master (ignored when Automotive Profile set)\n"
-		  "\t-L force slave (ignored when Automotive Profile set)\n"
-		  "\t-E enable test mode (as defined in AVnu automotive profile)\n"
 		  "\t-V enable AVnu Automotive Profile\n"
-		  "\t-N allow processing SyncFollowUp with negative correction field\n"
-		  "\t-GM set grandmaster for Automotive Profile\n"
+		  "\t-EPC <gm/slave/off> enable external port configuration with \"gm\" or \"slave\" or disable it with \"off\"\n"
+		  "\t-TA <true/false> enable transmission of announce messages\n"
+		  "\t-FAC <true/false> force asCapable to always be true\n"
+		  "\t-SRN <true/false> enable automotive sync rate negotiation\n"
+		  "\t-SS <true/false> enable automotive station states\n"
+		  "\t-TM <true/false> enable test mode (as defined in AVnu automotive profile)\n"
 		  "\t-INITSYNC <value> initial sync interval (Log base 2. 0 = 1 second)\n"
 		  "\t-OPERSYNC <value> operational sync interval (Log base 2. 0 = 1 second)\n"
 		  "\t-INITPDELAY <value> initial pdelay interval (Log base 2. 0 = 1 second)\n"
@@ -141,6 +147,8 @@ int main(int argc, char **argv)
 
 	bool syntonize = false;
 	int i;
+	/* Used to set the defaults for the automotive features */
+	bool automotiveProfile = false;
 	bool pps = false;
 	uint8_t priority1 = 248;
 	bool override_portstate = false;
@@ -182,10 +190,13 @@ int main(int argc, char **argv)
 	portInit.index = 0;
 	portInit.timestamper = NULL;
 	portInit.net_label = NULL;
-	portInit.automotive_profile = false;
-	portInit.isGM = false;
+	portInit.externalPortConfiguration = false;
+	portInit.staticPortState = PTP_SLAVE;
+	portInit.transmitAnnounce = true;
+	portInit.forceAsCapable = false;
+	portInit.negotiateAutomotiveSyncRate = false;
+	portInit.automotiveStationStates = false;
 	portInit.testMode = false;
-	portInit.linkUp = false;
 	portInit.allowNegativeCorrField = false;
 	portInit.initialLogSyncInterval = LOG2_INTERVAL_INVALID;
 	portInit.initialLogPdelayReqInterval = LOG2_INTERVAL_INVALID;
@@ -217,21 +228,52 @@ int main(int argc, char **argv)
 	}
 	ifname = new InterfaceName( argv[1], strlen(argv[1]) );
 
-	/* Process optional arguments */
+	struct ifreq ifr;
+	memset( &ifr, '\0', sizeof( ifr ) );
+	snprintf( ifr.ifr_name, IFNAMSIZ, "%s", argv[1] );
+	const int sd = socket( AF_UNIX, SOCK_DGRAM, 0 );
+
+	if( sd < 0 )
+	{
+		GPTP_LOG_ERROR( "Failed to open socket: %s", strerror( errno ) );
+		return -1;
+	}
+
+	if( ioctl( sd, SIOCGIFFLAGS, static_cast< void* >( &ifr ) ) < 0 )
+	{
+		GPTP_LOG_ERROR( "Failed ioctl(SIOCGIFFLAGS) got error: %s", strerror( errno ) );
+		close(sd);
+		return -1;
+	}
+	close(sd);
+	portInit.linkUp = ( ifr.ifr_flags & IFF_RUNNING );
+
+	/* Check arguments and determine if automotive profile is enabled */
+	for( i = 2; i < argc; ++i ) {
+		if (strcmp(argv[i] + 1, "V") == 0) {
+			automotiveProfile = true;
+		}
+	}
+
+	/* Set defaults for the AVnu automotive profile. These can be overrriden
+	 * using the command line options. */
+	if (automotiveProfile) {
+		portInit.externalPortConfiguration = true;
+		portInit.staticPortState = PTP_SLAVE;
+		portInit.transmitAnnounce = false;
+		portInit.forceAsCapable = true;
+		portInit.negotiateAutomotiveSyncRate = true;
+		portInit.automotiveStationStates = true;
+		portInit.testMode = true;
+	}
+
+	/* Process remaining optional arguments */
 	for( i = 2; i < argc; ++i ) {
 
 		if( argv[i][0] == '-' ) {
 			if( strcmp(argv[i] + 1,  "S") == 0 ) {
 				// Get syntonize directive from command line
 				syntonize = true;
-			}
-			else if( strcmp(argv[i] + 1,  "T" ) == 0 ) {
-				override_portstate = true;
-				port_state = PTP_MASTER;
-			}
-			else if( strcmp(argv[i] + 1,  "L" ) == 0 ) {
-				override_portstate = true;
-				port_state = PTP_SLAVE;
 			}
 			else if( strcmp(argv[i] + 1,  "M" )  == 0 ) {
 				// Open file
@@ -305,14 +347,102 @@ int main(int argc, char **argv)
 				ether_phy_delay[LINKSPEED_100MB].set_delay
 					( phy_delay[2], phy_delay[3] );
 			}
-			else if (strcmp(argv[i] + 1, "V") == 0) {
-				portInit.automotive_profile = true;
+			else if (strcmp(argv[i] + 1, "EPC") == 0) {
+				if (i + 1 < argc) {
+					if (strcmp(argv[i + 1], "gm") == 0) {
+						portInit.externalPortConfiguration = true;
+						portInit.staticPortState = PTP_MASTER;
+					} else if (strcmp(argv[i + 1], "slave") == 0) {
+						portInit.externalPortConfiguration = true;
+						portInit.staticPortState = PTP_SLAVE;
+					} else if (strcmp(argv[i + 1], "off") == 0) {
+						portInit.externalPortConfiguration = false;
+						portInit.staticPortState = PTP_SLAVE;
+					} else {
+						printf("set external port configuration to be \"gm\", \"slave\", or \"off\"\n");
+						return 0;
+					}
+				} else {
+					printf("set external port configuration to be \"gm\", \"slave\", or \"off\"\n");
+					return 0;
+				}
 			}
-			else if (strcmp(argv[i] + 1, "GM") == 0) {
-				portInit.isGM = true;
+			// TODO: Put this boolean parsing logic into a helper function to make
+			// it less DRY.
+			else if (strcmp(argv[i] + 1, "TA") == 0) {
+				if (i + 1 < argc) {
+					if (strcmp(argv[i + 1], "true") == 0) {
+					   portInit.transmitAnnounce = true;
+					} else if (strcmp(argv[i + 1], "false") == 0) {
+					   portInit.transmitAnnounce = false;
+					} else {
+						printf("set transmitAnnounce to \"true\" or \"false\"\n");
+						return 0;
+					}
+				} else {
+					printf("set transmitAnnounce to \"true\" or \"false\"\n");
+					return 0;
+				}
 			}
-			else if (strcmp(argv[i] + 1, "E") == 0) {
-				portInit.testMode = true;
+			else if (strcmp(argv[i] + 1, "FAC") == 0) {
+				if (i + 1 < argc) {
+					if (strcmp(argv[i + 1], "true") == 0) {
+						portInit.forceAsCapable = true;
+					} else if (strcmp(argv[i + 1], "false") == 0) {
+						portInit.forceAsCapable = false;
+					} else {
+						printf("set forceAsCapable to \"true\" or \"false\"\n");
+						return 0;
+					}
+				} else {
+					printf("set forceAsCapable to \"true\" or \"false\"\n");
+					return 0;
+				}
+			}
+			else if (strcmp(argv[i] + 1, "SRN") == 0) {
+				if (i + 1 < argc) {
+					if (strcmp(argv[i + 1], "true") == 0) {
+						portInit.negotiateAutomotiveSyncRate = true;
+					} else if (strcmp(argv[i + 1], "false") == 0) {
+						portInit.negotiateAutomotiveSyncRate = false;
+					} else {
+						printf("set negotiateAutomotiveSyncRate to \"true\" or \"false\"\n");
+						return 0;
+					}
+				} else {
+					printf("set negotiateAutomotiveSyncRate to \"true\" or \"false\"\n");
+					return 0;
+				}
+			}
+			else if (strcmp(argv[i] + 1, "SS") == 0) {
+				if (i + 1 < argc) {
+					if (strcmp(argv[i + 1], "true") == 0) {
+						portInit.automotiveStationStates = true;
+					} else if (strcmp(argv[i + 1], "false") == 0) {
+						portInit.automotiveStationStates = false;
+					} else {
+						printf("set automotiveStationStates to \"true\" or \"false\"\n");
+						return 0;
+					}
+				} else {
+					printf("set automotiveStationStates to \"true\" or \"false\"\n");
+					return 0;
+				}
+			}
+			else if (strcmp(argv[i] + 1, "TM") == 0) {
+				if (i + 1 < argc) {
+					if (strcmp(argv[i + 1], "true") == 0) {
+						portInit.testMode = true;
+					} else if (strcmp(argv[i + 1], "false") == 0) {
+						portInit.testMode = false;
+					} else {
+						printf("set testMode to \"true\" or \"false\"\n");
+						return 0;
+					}
+				} else {
+					printf("set testMode to \"true\" or \"false\"\n");
+					return 0;
+				}
 			}
 			else if (strcmp(argv[i] + 1, "N") == 0) {
 				portInit.allowNegativeCorrField = true;
@@ -383,8 +513,7 @@ int main(int argc, char **argv)
 	}
 
 	pClock = new IEEE1588Clock
-		( false, syntonize, priority1, timerq_factory, ipc,
-		  lock_factory );
+		( syntonize, priority1, timerq_factory, ipc, lock_factory );
 
 	if( restoredataptr != NULL ) {
 		if( !restorefailed )
@@ -456,23 +585,9 @@ int main(int argc, char **argv)
 		if( !restorefailed ) {
 			restorefailed = !pPort->restoreSerializedState( restoredataptr, &restoredatacount );
 			GPTP_LOG_INFO("Persistent port data restored: asCapable:%d, port_state:%d, one_way_delay:%lld",
-						  pPort->getAsCapable(), pPort->getPortState(), pPort->getLinkDelay());
+						   pPort->getAsCapable(), pPort->getPortState(), pPort->getLinkDelay());
 		}
 		restoredataptr = ((char *)restoredata) + (restoredatalength - restoredatacount);
-	}
-
-	if (portInit.automotive_profile) {
-		if (portInit.isGM) {
-			port_state = PTP_MASTER;
-		}
-		else {
-			port_state = PTP_SLAVE;
-		}
-		override_portstate = true;
-	}
-
-	if( override_portstate ) {
-		pPort->setPortState( port_state );
 	}
 
 	// Start PPS if requested
