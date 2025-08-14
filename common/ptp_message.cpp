@@ -1427,7 +1427,7 @@ void PTPMessagePathDelayResp::processMessage( CommonPort *port )
 
 	port->incCounter_ieee8021AsPortStatRxPdelayResponse();
 
-	if (port->getLastPDelayLock() != true) {
+	if (eport->getLastPDelayLock() != true) {
 		GPTP_LOG_ERROR("Failed to get last PDelay lock while processing a PDelayResp");
 		return;
 	}
@@ -1485,7 +1485,7 @@ bypass_verify_duplicate:
 		delete old_pdelay_resp;
 	}
 
-	port->putLastPDelayLock();
+	eport->putLastPDelayLock();
 	_gc = false;
 
 	return;
@@ -1604,7 +1604,7 @@ void PTPMessagePathDelayRespFollowUp::processMessage
 
 	port->incCounter_ieee8021AsPortStatRxPdelayResponseFollowUp();
 
-	if (port->getLastPDelayLock() != true) {
+	if (eport->getLastPDelayLock() != true) {
 		GPTP_LOG_ERROR("Failed to get last PDelay lock while processing a PDelay Follow Up");
 		return;
 	}
@@ -1830,7 +1830,7 @@ void PTPMessagePathDelayRespFollowUp::processMessage
 	if( !port->setLinkDelay( link_delay ))
 	{
 		if( !port->forceAsCapableEnabled() &&
-			 (port->getAsCapable() || !port->getAsCapableEvaluated()) ) {
+			 (port->getAsCapable() || !port->getAsCapableEvaluated()) )
 		{
 			GPTP_LOG_STATUS( "Link delay %ld beyond "
 					"neighborPropDelayThresh; "
@@ -1839,9 +1839,11 @@ void PTPMessagePathDelayRespFollowUp::processMessage
 		}
 	} else
 	{
-		if( !port->forceAsCapableEnabled() && !port->getAsCapable() ) {
+		if( !port->forceAsCapableEnabled() && !port->getAsCapable() )
+		{
 			GPTP_LOG_STATUS("Link delay %ld within neighborPropDelayThresh; setting AsCapable", link_delay);
 			port->setAsCapable( true );
+		}
 	}
 	port->setPeerOffset( request_tx_timestamp, remote_req_rx_timestamp );
 
@@ -1852,7 +1854,7 @@ void PTPMessagePathDelayRespFollowUp::processMessage
 	_gc = true;
 
  defer:
-	port->putLastPDelayLock();
+	eport->putLastPDelayLock();
 
 	return;
 }

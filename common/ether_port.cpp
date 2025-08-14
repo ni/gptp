@@ -430,7 +430,7 @@ bool EtherPort::_processEvent( Event e )
 		// Reset send intervals to initial values
 		resetInitSyncInterval();
 		setAnnounceInterval( 0 );
-		log_min_mean_pdelay_req_interval = initialLogPdelayReqInterval;
+		resetInitPDelayInterval();
 
 		if( negotiateAutomotiveSyncRateEnabled() && getPortState() == PTP_SLAVE ) {
 			// Send an initial signaling message
@@ -689,7 +689,7 @@ bool EtherPort::_processEvent( Event e )
 					if (negotiateAutomotiveSyncRateEnabled()) {
 						sigMsg->setintervals(PTPMessageSignalling::sigMsgInterval_NoChange, getSyncInterval(), PTPMessageSignalling::sigMsgInterval_NoChange);
 					} else {
-						sigMsg->setintervals(log_min_mean_pdelay_req_interval, getSyncInterval(), PTPMessageSignalling::sigMsgInterval_NoChange);
+						sigMsg->setintervals(getPDelayInterval(), getSyncInterval(), PTPMessageSignalling::sigMsgInterval_NoChange);
 					}
 					sigMsg->sendPort(this, NULL);
 					delete sigMsg;

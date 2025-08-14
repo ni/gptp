@@ -162,6 +162,8 @@ private:
     OSLock *timerq_lock;
     OSLock *ipc_lock;
 
+public:
+
 	/**
 	 * @brief  Add a new event to the timer queue
 	 * @param  target EtherPort target
@@ -179,7 +181,6 @@ private:
 	 * @return void
 	 */
 	void deleteEventTimer( CommonPort *target, Event e );
-public:
   /**
    * @brief Instantiates a IEEE 1588 Clock
    * @param syntonize if TRUE, clock will syntonize to the master clock
@@ -564,7 +565,7 @@ public:
     Timestamp local_time, FrequencyRatio master_local_freq_offset,
     int64_t local_system_offset, Timestamp system_time,
     FrequencyRatio local_system_freq_offset, unsigned sync_count,
-    unsigned pdelay_count, PortState port_state, bool asCapable );
+    unsigned pdelay_count, PortState port_state, bool asCapable, uint64_t mean_path_delay );
 
 	/**
 	 * @brief  Get local:system frequency ratio
